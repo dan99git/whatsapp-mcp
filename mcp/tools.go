@@ -114,4 +114,51 @@ func (m *MCPServer) registerTools() {
 		),
 		m.handleGetMyInfo,
 	)
+
+	// 8. mark chat as read
+	m.server.AddTool(
+		mcp.NewTool("mark_as_read",
+			mcp.WithDescription("Mark messages in a WhatsApp chat as read. Requires at least one message ID to mark as the read point."),
+			mcp.WithString("chat_jid",
+				mcp.Required(),
+				mcp.Description("chat JID of the conversation to mark as read"),
+			),
+			mcp.WithString("sender_jid",
+				mcp.Required(),
+				mcp.Description("JID of the message sender (use your own JID for messages you sent)"),
+			),
+			mcp.WithString("message_id",
+				mcp.Required(),
+				mcp.Description("ID of the message to mark as read (typically the latest unread message)"),
+			),
+		),
+		m.handleMarkAsRead,
+	)
+
+	// 9. reply to a message
+	m.server.AddTool(
+		mcp.NewTool("reply_message",
+			mcp.WithDescription("Send a reply to a specific message in a WhatsApp chat. The reply will quote the original message."),
+			mcp.WithString("chat_jid",
+				mcp.Required(),
+				mcp.Description("chat JID of the conversation"),
+			),
+			mcp.WithString("text",
+				mcp.Required(),
+				mcp.Description("reply text to send"),
+			),
+			mcp.WithString("quoted_message_id",
+				mcp.Required(),
+				mcp.Description("ID of the message being replied to"),
+			),
+			mcp.WithString("quoted_sender_jid",
+				mcp.Required(),
+				mcp.Description("JID of the sender of the message being replied to"),
+			),
+			mcp.WithString("quoted_text",
+				mcp.Description("text of the original message being quoted (for display in the reply bubble)"),
+			),
+		),
+		m.handleReplyMessage,
+	)
 }

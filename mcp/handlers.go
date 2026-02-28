@@ -323,10 +323,15 @@ func (m *MCPServer) handleSearchMessages(ctx context.Context, request mcp.CallTo
 			sender = "You"
 		}
 
-		fmt.Fprintf(&result, "%d. [%s] %s in chat %s:\n",
+		chatDisplay := msg.ChatName
+		if chatDisplay == "" {
+			chatDisplay = msg.ChatJID
+		}
+		fmt.Fprintf(&result, "%d. [%s] %s in %s (JID: %s):\n",
 			i+1,
 			m.formatDateTime(msg.Timestamp),
 			sender,
+			chatDisplay,
 			msg.ChatJID)
 		fmt.Fprintf(&result, "   %s\n", msg.Text)
 
@@ -569,4 +574,69 @@ func (m *MCPServer) handleGetMyInfo(ctx context.Context, request mcp.CallToolReq
 	}
 
 	return mcp.NewToolResultText(result.String()), nil
+}
+
+// handleMarkAsRead handles the mark_as_read tool request.
+func (m *MCPServer) handleMarkAsRead(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	chatJID, err := request.RequireString("chat_jid")
+	if err != nil {
+		return mcp.NewToolResultError("chat_jid parameter is required"), nil
+	}
+
+	senderJID, err := request.RequireString("sender_jid")
+	if err != nil {
+		return mcp.NewToolResultError("sender_jid parameter is required"), nil
+	}
+
+	messageID, err := request.RequireString("message_id")
+	if err != nil {
+		return mcp.NewToolResultError("message_id parameter is required"), nil
+	}
+
+	if !m.wa.IsLoggedIn() {
+		return mcp.NewToolResultError("WhatsApp is not connected"), nil
+	}
+
+	err = m.wa.MarkChatAsRead(ctx, chatJID, senderJID, []string{messageID})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to mark as read: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Marked messages as read in %s", chatJID)), nil
+}
+
+// handleReplyMessage handles the reply_message tool request.
+func (m *MCPServer) handleReplyMessage(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	chatJID, err := request.RequireString("chat_jid")
+	if err != nil {
+		return mcp.NewToolResultError("chat_jid parameter is required"), nil
+	}
+
+	text, err := request.RequireString("text")
+	if err != nil {
+		return mcp.NewToolResultError("text parameter is required"), nil
+	}
+
+	quotedMessageID, err := request.RequireString("quoted_message_id")
+	if err != nil {
+		return mcp.NewToolResultError("quoted_message_id parameter is required"), nil
+	}
+
+	quotedSenderJID, err := request.RequireString("quoted_sender_jid")
+	if err != nil {
+		return mcp.NewToolResultError("quoted_sender_jid parameter is required"), nil
+	}
+
+	quotedText := request.GetString("quoted_text", "")
+
+	if !m.wa.IsLoggedIn() {
+		return mcp.NewToolResultError("WhatsApp is not connected"), nil
+	}
+
+	err = m.wa.SendReplyMessage(ctx, chatJID, text, quotedMessageID, quotedSenderJID, quotedText)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to send reply: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Reply sent successfully to %s", chatJID)), nil
 }

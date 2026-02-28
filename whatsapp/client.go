@@ -35,6 +35,8 @@ type Client struct {
 	historySyncMux   sync.Mutex           // protects the map
 	ctx              context.Context      // client lifecycle context
 	cancel           context.CancelFunc   // cancel function to stop all goroutines
+	recentSends      map[string]time.Time // dedup guard: tracks recent sends by chatJID:text
+	recentSendsMux   sync.Mutex           // protects the dedup map
 }
 
 // fileLogger wraps a logger to write to both stdout and a file.
@@ -140,6 +142,7 @@ func NewClient(store *storage.MessageStore, mediaStore *storage.MediaStore, webh
 		historySyncChans: make(map[string]chan bool),
 		ctx:              clientCtx,
 		cancel:           cancel,
+		recentSends:      make(map[string]time.Time),
 	}
 
 	// Configure retry receipt handler: when a recipient can't decrypt a message,
@@ -220,6 +223,20 @@ func (c *Client) SendTextMessage(ctx context.Context, chatJID string, text strin
 	if err != nil {
 		return err
 	}
+
+	// Dedup guard: suppress duplicate sends within a 5-second window.
+	// MCP transports (especially SSE) may retry tool calls, causing duplicates.
+	dedupeKey := chatJID + ":" + text
+	c.recentSendsMux.Lock()
+	if lastSent, exists := c.recentSends[dedupeKey]; exists {
+		if time.Since(lastSent) < 5*time.Second {
+			c.recentSendsMux.Unlock()
+			c.log.Infof("Dedup: suppressing duplicate send to %s", chatJID)
+			return nil
+		}
+	}
+	c.recentSends[dedupeKey] = time.Now()
+	c.recentSendsMux.Unlock()
 
 	resp, err := c.wa.SendMessage(ctx, targetJID, &waE2E.Message{
 		Conversation: proto.String(text),
@@ -394,6 +411,74 @@ func (c *Client) GetMyInfo(ctx context.Context) (*MyInfo, error) {
 		PictureURL:   pictureURL,
 		BusinessName: businessName,
 	}, nil
+}
+
+// MarkChatAsRead marks messages in a chat as read up to the given message ID.
+func (c *Client) MarkChatAsRead(ctx context.Context, chatJID string, senderJID string, messageIDs []string) error {
+	chatParsed, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid chat JID: %w", err)
+	}
+
+	senderParsed, err := types.ParseJID(senderJID)
+	if err != nil {
+		return fmt.Errorf("invalid sender JID: %w", err)
+	}
+
+	ids := make([]types.MessageID, len(messageIDs))
+	for i, id := range messageIDs {
+		ids[i] = types.MessageID(id)
+	}
+
+	return c.wa.MarkRead(ctx, ids, time.Now(), chatParsed, senderParsed)
+}
+
+// SendReplyMessage sends a text message as a reply to a specific message.
+func (c *Client) SendReplyMessage(ctx context.Context, chatJID string, text string, quotedMessageID string, quotedSenderJID string, quotedText string) error {
+	targetJID, err := types.ParseJID(chatJID)
+	if err != nil {
+		return err
+	}
+
+	msg := &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: proto.String(text),
+			ContextInfo: &waE2E.ContextInfo{
+				StanzaID:    proto.String(quotedMessageID),
+				Participant: proto.String(quotedSenderJID),
+				QuotedMessage: &waE2E.Message{
+					Conversation: proto.String(quotedText),
+				},
+			},
+		},
+	}
+
+	resp, err := c.wa.SendMessage(ctx, targetJID, msg)
+	if err != nil {
+		return err
+	}
+
+	// Add to recent messages cache for retry receipt handling
+	c.wa.DangerousInternals().AddRecentMessage(targetJID, resp.ID, msg, nil)
+
+	c.store.SaveMessage(storage.Message{
+		ID:          resp.ID,
+		ChatJID:     chatJID,
+		SenderJID:   resp.Sender.String(),
+		Text:        text,
+		Timestamp:   resp.Timestamp,
+		IsFromMe:    true,
+		MessageType: "text",
+	})
+
+	// Persist protobuf for retry receipt handling across restarts
+	if protoBytes, err := proto.Marshal(msg); err == nil {
+		c.store.SaveMessageProto(resp.ID, protoBytes)
+	} else {
+		c.log.Warnf("Failed to marshal reply proto for %s: %v", resp.ID, err)
+	}
+
+	return nil
 }
 
 // getEnabledTypes returns a list of enabled media types for logging.
